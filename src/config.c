@@ -45,7 +45,7 @@ void config_init(config_t *config) {
     config->crop_h = 0;
     config->h_stretch = 1.0f;
     config->smooth_h = true;
-    config->use_240p = true;  // Default to 240p for retro games
+    config->use_240p = false;  // Default to 480i for Switch home screen
     config->scanline_offset = 0;
 }
 

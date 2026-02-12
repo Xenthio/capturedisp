@@ -65,7 +65,7 @@ static color_mode_t color_mode = COLOR_PAL60;
 static bool current_240p_mode = false;
 static capture_ctx_t *capture = NULL;
 static ui_mode_t ui_mode = UI_NORMAL;
-static bool auto_detect = false;
+static bool auto_detect = true;
 static detected_preset_t last_detected = PRESET_NONE;
 static int detect_cooldown = 0;  // Frames until next detection
 static int last_border_luma[4] = {0};  // Track border brightness to detect actual changes
@@ -247,13 +247,19 @@ static detected_preset_t detect_preset(const uint8_t *yuyv, int width, int heigh
     int border_y1 = sample_yuyv_luma(yuyv, width, 400, 300);
     int border_y2 = sample_yuyv_luma(yuyv, width, 400, 500);
     int border_y3 = sample_yuyv_luma(yuyv, width, 400, 700);
+    // Also check the right side border
+    int border_y4 = sample_yuyv_luma(yuyv, width, 1520, 300);
+    int border_y5 = sample_yuyv_luma(yuyv, width, 1520, 500);
+    int border_y6 = sample_yuyv_luma(yuyv, width, 1520, 700);
     
-    // If border area is not dark, probably Switch menu - no crop
-    if (border_y1 > 30 || border_y2 > 30 || border_y3 > 30) {
+    // If border area is not dark on BOTH sides, probably Switch menu - no crop
+    // Need all 6 samples to be dark (< 25) to detect as bordered game
+    if (border_y1 > 25 || border_y2 > 25 || border_y3 > 25 ||
+        border_y4 > 25 || border_y5 > 25 || border_y6 > 25) {
         return PRESET_NONE;
     }
     
-    // Border is black - we're in a game. Now detect NES vs SNES.
+    // Border is black on both sides - we're in a game. Now detect NES vs SNES.
     // Check y=85 at center - NES has game content here, SNES still has border
     int y85_luma = sample_yuyv_luma(yuyv, width, 700, 85);
     int y95_luma = sample_yuyv_luma(yuyv, width, 700, 95);
@@ -818,7 +824,10 @@ int main(int argc, char *argv[]) {
             
             // Auto-detect preset if enabled (check every 30 frames ~1 sec)
             // Only re-evaluate if the border area has actually changed
-            if (auto_detect && detect_cooldown <= 0) {
+            static int startup_frames = 0;
+            startup_frames++;
+            
+            if (auto_detect && startup_frames > 5 && detect_cooldown <= 0) {
                 if (border_changed(raw, capture->width, last_detected)) {
                     detected_preset_t detected = detect_preset(raw, capture->width, capture->height);
                     if (detected != last_detected) {
@@ -842,6 +851,24 @@ int main(int argc, char *argv[]) {
                         } else {
                             crop_x = new_cx; crop_y = new_cy;
                         }
+                        
+                        // Switch video mode based on preset
+                        if (detected == PRESET_NONE) {
+                            // 16:9 content - use 480i for more vertical resolution
+                            if (config.use_240p) {
+                                config.use_240p = false;
+                                set_video_mode(false);
+                                printf("Switched to 480i for 16:9 content\n");
+                            }
+                        } else {
+                            // NES/SNES - use 240p for scanlines
+                            if (!config.use_240p) {
+                                config.use_240p = true;
+                                set_video_mode(true);
+                                printf("Switched to 240p for retro content\n");
+                            }
+                        }
+                        
                         last_detected = detected;
                     }
                 }
@@ -877,7 +904,21 @@ int main(int argc, char *argv[]) {
         int native_h = crop_h / 4;
         
         int dst_w, dst_h;
-        if (scale_mode == SCALE_PIXEL) {
+        
+        // Check if this is 16:9 content (full 1920x1080 or close)
+        bool is_16_9 = (crop_w == 1920 && crop_h == 1080);
+        
+        if (is_16_9) {
+            // 16:9 content: letterbox to fit in 4:3 output
+            // Fill width, calculate height to maintain 16:9
+            dst_w = out_w;
+            dst_h = (dst_w * 9) / 16;
+            // If too tall, fit by height instead
+            if (dst_h > out_h) {
+                dst_h = out_h;
+                dst_w = (dst_h * 16) / 9;
+            }
+        } else if (scale_mode == SCALE_PIXEL) {
             // Pixel-perfect: native * 2
             dst_w = native_w * 2;
             dst_h = native_h * 2;
