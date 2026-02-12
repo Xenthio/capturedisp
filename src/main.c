@@ -302,75 +302,7 @@ static void apply_detected_preset(detected_preset_t preset,
     }
 }
 
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-#include <arm_neon.h>
-// NEON optimized YUYV to RGBA - process 8 pixels at a time
-static void yuyv_crop_to_rgba(const uint8_t *src, int src_w, int src_h,
-                               uint8_t *dst,
-                               int crop_x, int crop_y, int crop_w, int crop_h) {
-    (void)src_h;
-    crop_x &= ~1;
-    
-    const int16x8_t c128 = vdupq_n_s16(128);
-    const int16x8_t c359 = vdupq_n_s16(359);
-    const int16x8_t c88 = vdupq_n_s16(88);
-    const int16x8_t c183 = vdupq_n_s16(183);
-    const int16x8_t c454 = vdupq_n_s16(454);
-    
-    for (int y = 0; y < crop_h; y++) {
-        const uint8_t *row = src + ((crop_y + y) * src_w + crop_x) * 2;
-        uint8_t *out = dst + y * crop_w * 4;
-        
-        int x = 0;
-        for (; x + 8 <= crop_w; x += 8) {
-            uint8x8x2_t yuyv0 = vld2_u8(row);
-            row += 16;
-            
-            uint8x8_t y8 = yuyv0.val[0];
-            uint8x8x2_t uv_split = vuzp_u8(yuyv0.val[1], yuyv0.val[1]);
-            uint8x8x2_t u_dup = vzip_u8(uv_split.val[0], uv_split.val[0]);
-            uint8x8x2_t v_dup = vzip_u8(uv_split.val[1], uv_split.val[1]);
-            uint8x8_t u8 = u_dup.val[0];
-            uint8x8_t v8 = v_dup.val[0];
-            
-            int16x8_t y16 = vreinterpretq_s16_u16(vmovl_u8(y8));
-            int16x8_t u16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u8)), c128);
-            int16x8_t v16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v8)), c128);
-            
-            int16x8_t r16 = vaddq_s16(y16, vshrq_n_s16(vmulq_s16(v16, c359), 8));
-            int16x8_t g16 = vsubq_s16(y16, vshrq_n_s16(
-                vaddq_s16(vmulq_s16(u16, c88), vmulq_s16(v16, c183)), 8));
-            int16x8_t b16 = vaddq_s16(y16, vshrq_n_s16(vmulq_s16(u16, c454), 8));
-            
-            uint8x8_t r8_out = vqmovun_s16(r16);
-            uint8x8_t g8_out = vqmovun_s16(g16);
-            uint8x8_t b8_out = vqmovun_s16(b16);
-            uint8x8_t a8 = vdup_n_u8(255);
-            
-            // SDL_PIXELFORMAT_RGBA32 is ABGR in memory on little-endian
-            uint8x8x4_t abgr = {a8, b8_out, g8_out, r8_out};
-            vst4_u8(out, abgr);
-            out += 32;
-        }
-        
-        // Scalar remainder
-        for (; x < crop_w; x += 2) {
-            int y0 = row[0], u = row[1], y1 = row[2], v = row[3];
-            row += 4;
-            int uu = u - 128, vv = v - 128;
-            int ruv = (359 * vv) >> 8;
-            int guv = (88 * uu + 183 * vv) >> 8;
-            int buv = (454 * uu) >> 8;
-            #define CLAMP(x) ((x) < 0 ? 0 : ((x) > 255 ? 255 : (x)))
-            out[0] = CLAMP(y0 + ruv); out[1] = CLAMP(y0 - guv); out[2] = CLAMP(y0 + buv); out[3] = 255;
-            out[4] = CLAMP(y1 + ruv); out[5] = CLAMP(y1 - guv); out[6] = CLAMP(y1 + buv); out[7] = 255;
-            out += 8;
-            #undef CLAMP
-        }
-    }
-}
-#else
-// Scalar fallback for non-ARM platforms
+// YUYV to RGBA conversion - scalar version (reliable and fast with -O3)
 static void yuyv_crop_to_rgba(const uint8_t *src, int src_w, int src_h,
                                uint8_t *dst, 
                                int crop_x, int crop_y, int crop_w, int crop_h) {
@@ -382,23 +314,37 @@ static void yuyv_crop_to_rgba(const uint8_t *src, int src_w, int src_h,
         uint8_t *out = dst + y * crop_w * 4;
         
         for (int x = 0; x < crop_w; x += 2) {
-            int y0 = row[0], u = row[1], y1 = row[2], v = row[3];
+            int y0 = row[0];
+            int u  = row[1];
+            int y1 = row[2];
+            int v  = row[3];
             row += 4;
-            int uu = u - 128, vv = v - 128;
+            
+            int uu = u - 128;
+            int vv = v - 128;
             int ruv = (359 * vv) >> 8;
             int guv = (88 * uu + 183 * vv) >> 8;
             int buv = (454 * uu) >> 8;
-            int r0 = y0 + ruv, g0 = y0 - guv, b0 = y0 + buv;
-            int r1 = y1 + ruv, g1 = y1 - guv, b1 = y1 + buv;
-            #define CLAMP(x) ((x) < 0 ? 0 : ((x) > 255 ? 255 : (x)))
-            out[0] = CLAMP(r0); out[1] = CLAMP(g0); out[2] = CLAMP(b0); out[3] = 255;
-            out[4] = CLAMP(r1); out[5] = CLAMP(g1); out[6] = CLAMP(b1); out[7] = 255;
+            
+            int r0 = y0 + ruv;
+            int g0 = y0 - guv;
+            int b0 = y0 + buv;
+            int r1 = y1 + ruv;
+            int g1 = y1 - guv;
+            int b1 = y1 + buv;
+            
+            out[0] = r0 < 0 ? 0 : (r0 > 255 ? 255 : r0);
+            out[1] = g0 < 0 ? 0 : (g0 > 255 ? 255 : g0);
+            out[2] = b0 < 0 ? 0 : (b0 > 255 ? 255 : b0);
+            out[3] = 255;
+            out[4] = r1 < 0 ? 0 : (r1 > 255 ? 255 : r1);
+            out[5] = g1 < 0 ? 0 : (g1 > 255 ? 255 : g1);
+            out[6] = b1 < 0 ? 0 : (b1 > 255 ? 255 : b1);
+            out[7] = 255;
             out += 8;
-            #undef CLAMP
         }
     }
 }
-#endif
 
 void draw_text(SDL_Renderer *renderer, int x, int y, const char *text, SDL_Color color) {
     if (!font || !text || !text[0]) return;
