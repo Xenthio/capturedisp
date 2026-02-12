@@ -347,8 +347,9 @@ static void yuyv_crop_to_rgba(const uint8_t *src, int src_w, int src_h,
             uint8x8_t b8_out = vqmovun_s16(b16);
             uint8x8_t a8 = vdup_n_u8(255);
             
-            uint8x8x4_t rgba = {r8_out, g8_out, b8_out, a8};
-            vst4_u8(out, rgba);
+            // SDL_PIXELFORMAT_RGBA32 is ABGR in memory on little-endian
+            uint8x8x4_t abgr = {a8, b8_out, g8_out, r8_out};
+            vst4_u8(out, abgr);
             out += 32;
         }
         
